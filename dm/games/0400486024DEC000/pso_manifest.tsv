@@ -1,2 +1,15 @@
 # Prewarm seed list (shipped in the app, next to shader_map.tsv). Rows: S<TAB>shader key<TAB>stage / R<TAB>render pipeline key (pso_skey hex) / C<TAB>compute shader key.
-# Provisional profile: empty until a run with compiled shaders records first-use order on the Mac.
+# Movie compute programs observed on v131072: prepare their native pipelines before playback.
+# A cold M2 Max driver cache can otherwise spend minutes compiling the NDVE network mid-frame.
+C	c2fc2ddd604c25e7_b
+C	4f41ccf24f163e0d_b
+C	49dff010b9832251_b
+C	ba079f68ae288dba_b
+C	a8b4fb48fee0ccf8_b
+C	e2eebd7ba18fe35f_b
+C	e6be82d835fbe4d3_b
+C	9442573ee4ace011_b
+C	0a56002cdc7e1fce_b
+C	d15370a382630d4e_b
+C	7f7ff0f36b54d90f_b
+C	5a7d69b067a7f011_b

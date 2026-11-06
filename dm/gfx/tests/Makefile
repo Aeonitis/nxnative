@@ -168,6 +168,9 @@ t_pool_retired: t_pool_retired.m $(MTL_T_DEP)
 check_t_pool_retired: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pool_chunks: t_pool_chunks.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_chunks.m $(MTL_T_SRC) $(FW)
+t_pool_table: t_pool_table.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_table.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_pool_table: RUN_ENV = MTL_DEBUG_LAYER=1
 # Raw global memory on the GPU through the host's pool table (t_gmem_raw.m), with the shader test_dmsh_ampere_mem.py translates (DMSH_TEST_XLATE, default the in-repo translator);
 # skipped only when the translator does not run (its exit code 77)
 t_gmem_raw: t_gmem_raw.m $(MTL_T_DEP)

@@ -66,6 +66,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Pairing:** control sections are shared between programs, so pair by entry, never by searching for code near a control.
 - **Found on:** [Super Mario 3D World + Bowser's Fury](../../dm/games/010028600EBDA000/README.md) (BAHS version 9).
 
+### BAHS metadata mistaken for a shader record
+
+- **Symptom:** one apparent compute shader fails at offset zero on Ampere opcode `0x481`; other extra shaders have no program variation referencing them.
+- **Cause:** scanning every four-byte boundary for `{code offset, 0, control size, control-relative offset}` also matches words inside a binary record's control or auxiliary data. Such a match can point a real control section at unrelated code-region data and pass the header and length checks.
+- **Fix:** when the BAHS binary and program arrays validate, keep only the actual binary-record entry offsets. Keep the existing discovery fallback for unrecognized layouts, and do not cap control sizes or invent an instruction implementation. The verified arrays also provide the program variations as before.
+- **Found on:** [Ocarina of Time v131072](../../dm/games/0400486024DEC000/README.md): four false entries, including the failed `68bbe98b3bfd9876` in `agl_common.sharcb`. Removing them leaves 42,850 shader identities; both pair tables are unchanged.
+- **Check:** `test_split_bahs_records.py` covers a false metadata match, valid records, large control sections and an unrecognized array layout.
+
 ### Zstd files recognised by their magic
 
 - **Symptom:** `shader_split.py` finds 0 shaders in a RomFS of zstd files named `.zst`.
@@ -1652,6 +1660,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Fix:** `mtl_prog_prefetch` (called from `nvnProgramSetShaders`) loads each stage's library on a background queue, with a vertex shader's pulling entry as the prewarm does, and the next submission takes it into the shader cache (`warm_claim`), writing it to the prewarm lists as `shader_get` would. A set of the libraries loaded or under way (`progpf_first`, which `shader_get` and `shader_prefetch_rest` also mark) loads each once. A draw that comes before its library has loaded loads it itself, as before. The shader map is read once from any thread (`shmap_read_once`); the prewarm still starts on the submit thread, once (`shmap_load`). A first version put the prewarm inside the same `dispatch_once`, and the pipeline prebuild's own call of `shmap_load` from inside it re-entered it: libdispatch aborted Tears of the Kingdom and Pokémon Scarlet at boot (the regression found it; Donkey Kong Bananza runs no prebuild). `DM_NVN_PREFETCH=0` turns it off.
 - **Check:** Donkey Kong Bananza's scripted route, both runs with the drive idle: the first frame's 4 libraries (22 ms on the submit thread) no longer load there; the level opening's 3 still do (0.5-3.9 ms), its programs made just before their draws.
 - **Found on:** [Donkey Kong Bananza](../../dm/games/040074A01BF12000/README.md#found-on-this-game): 3 to 7 libraries a new area, which took up to 4 s a frame in a session with the drive slowed by other work.
+
+### Slow compute pipelines hidden behind a black movie
+
+- **Symptom:** music plays while the picture and Metal HUD stop advancing. The submit thread waits in `newComputePipelineStateWithFunction`; Apple's compiler is active in `PromoteMemToReg`. Offline shader-library and render-base builds have completed successfully.
+- **Cause:** a compiled Metal library still needs a device pipeline. A missing compute row in the startup prewarm seed leaves that work until the movie dispatch. Recording only completed first uses cannot seed a compile the player interrupted. A second issue hid startup progress: estimating remaining time from thousands of fast library loads predicted that a few expensive compute pipelines would finish immediately.
+- **Fix:** seed observed movie compute programs as `C` rows in the game's `pso_manifest.tsv`, using the existing startup preparation and device cache. Show preparation progress after the existing half-second threshold while any work remains, without extrapolating the duration of unlike tasks. Shader calculations and the graphics feature set are unchanged.
+- **Check:** `t_pso_warm` holds a final real library load behind a gate after 200 cached tasks; progress must appear before releasing the gate, on both Metal compiler paths. The movie seed's keys must resolve to compute stages in its shader map.
+- **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md), M2 Max opening movie; the game note holds the measured preparation times and captures.
 
 ### The prepare step inside the shader map's once
 

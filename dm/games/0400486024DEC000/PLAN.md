@@ -6,6 +6,8 @@ Status marks reflect the update v131072 package currently under survey: **done**
 
 ## Immediate continuation runbook
 
+The current M2 Max full shader build is complete; see the [current shader results](README.md#shaders). Normal rebuilds can reuse that full cache without `--seen-shaders`. The selected-build steps below remain the discovery workflow.
+
 Run these steps from the nxnative checkout. They resume safely: the shader content-addressed cache keeps completed work. Never create `inputs.tsv`, `c1_full.tsv` or `cb_extent.tsv` by hand; only a successful unfiltered shader build proves and writes them.
 
 ```sh
@@ -17,7 +19,7 @@ PY=/opt/homebrew/bin/python3.14
 cd "$NX"
 ```
 
-1. **Build the observed Mac shaders only.** Pass `--seen-shaders`; without it, the script builds the full 42,854-shader map, which can take hours. The selected build covers the 2,765 shader keys in `shader_seen.tsv` plus any missing keys reported by the latest run logs; uncovered areas may render incompletely. The script owns the cache setting and stores it in `"$W/shader/cache/cas.db"`. Do not set `DMSH_CAS` to a `cas/` directory: it must be a SQLite file.
+1. **Build the observed Mac shaders only.** Pass `--seen-shaders`; without it, the script builds the full 42,850-shader map, which can take hours. The selected build covers the 2,765 shader keys in `shader_seen.tsv` plus any missing keys reported by the latest run logs; uncovered areas may render incompletely. The script owns the cache setting and stores it in `"$W/shader.noindex/cache/cas.db"`. Do not set `DMSH_CAS` to a `cas/` directory: it must be a SQLite file.
 
    ```sh
    DM_GAME="$G" DM_ROOT="$W" \
@@ -25,15 +27,15 @@ cd "$NX"
      --work-dir "$W" --platform mac --seen-shaders --keep-extracted
    ```
 
-   The success gate is a completed Mac build and `"$W/shader/partial-keys.txt"` containing the selected shader keys. This partial library is for development only; it is not stamped as full coverage and does not produce `c1_full.tsv` or `cb_extent.tsv`.
+   The success gate is a completed Mac build and `"$W/shader.noindex/partial-keys.txt"` containing the selected shader keys. This partial library is for development only; it is not stamped as full coverage and does not produce `c1_full.tsv` or `cb_extent.tsv`.
 
    ```sh
    CHAIN=$("$PY" dm/gfx/tools/dmsh_chain.py)
-   test -f "$W/shader/partial/b-$CHAIN/key"
-   wc -l < "$W/shader/partial-keys.txt"
+   test -f "$W/shader.noindex/partial/b-$CHAIN/key"
+   wc -l < "$W/shader.noindex/partial-keys.txt"
    ```
 
-   The CAS is the file `"$W/shader/cache/cas.db"`; a stale shell override pointing to a directory is ignored by the build script. If the stage fails, preserve the log, search it for `[RED]`, `failed` and `Traceback`, and rerun with the same `--seen-shaders` command.
+   The CAS is the file `"$W/shader.noindex/cache/cas.db"`; a stale shell override pointing to a directory is ignored by the build script. If the stage fails, preserve the log, search it for `[RED]`, `failed` and `Traceback`, and rerun with the same `--seen-shaders` command.
 
 2. **Rebuild the host and run the scoped checks.** The host and libraries must name the same chain.
 
@@ -158,7 +160,7 @@ cd "$NX"
 
 - [ ] Verify GPU barriers, attachment feedback, bindless resources, indirect draws, mesh/task stages and compute dispatches used by the route.
 - [ ] Check screenshots at stable frame numbers and use frame capture/replay for the first persistent mismatch.
-- [ ] Record a provisional `pso_manifest.tsv` from real first-use order after shaders render; then verify it and per-device `pso_user.tsv` prewarm correctly.
+- [x] Seed the 12 observed opening-movie compute pipelines in `pso_manifest.tsv`; verify preparation with the device's `pso_user.tsv` and warm-launch captures. Gameplay pipeline coverage remains open.
 - [ ] Measure frame p50/p95/p99, GPU time, long-frame causes, memory pressure and shader/pipeline compilation stalls.
 - [ ] Optimize only after identical routes and images establish correctness; prefer general host fixes over title switches.
 

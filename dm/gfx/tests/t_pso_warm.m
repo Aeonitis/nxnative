@@ -290,6 +290,41 @@ static void native_mesh(NSString *dir) {
     g_warm_t0 = bp_now(); warm_finish();
 }
 
+// Many cached tasks followed by one blocked load must still show preparation progress.
+static void progress_with_slow_tail(void) {
+    warm_load_begin(); g_warm_items = [NSMutableArray array];
+    EXPECT("progress fixture cached", 1, warm_shader(@"warm-vs", 0) != nil);
+    WarmTask *fast = [WarmTask new]; fast->key = @"warm-vs"; fast->stage = 0;
+    WarmTask *slow = [WarmTask new]; slow->key = @"warm-fs"; slow->stage = 1;
+    NSMutableArray *tasks = [NSMutableArray array];
+    for (int i = 0; i < 200; i++) [tasks addObject:fast];
+    [tasks addObject:slow];
+    WarmGateDevice *gate = [WarmGateDevice new]; gate->device = g_dev;
+    gate->entered = dispatch_semaphore_create(0); gate->release = dispatch_semaphore_create(0);
+    g_dev = (id<MTLDevice>)gate;
+    FILE *capture = tmpfile(); int saved = dup(STDERR_FILENO);
+    if (!capture || saved < 0) abort();
+    fflush(stderr); dup2(fileno(capture), STDERR_FILENO);
+    atomic_store(&g_warm_done, 0);
+    setenv("DM_PSO_PREPARE_THREADS", "2", 1);
+    dispatch_group_t callers = dispatch_group_create();
+    dispatch_group_async(callers, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ @autoreleasepool { warm_prepare(tasks, 201); } });
+    long entered = dispatch_semaphore_wait(gate->entered, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    int shown = 0; uint64_t start = bp_now();
+    while (!entered && bp_now() - start < 2000000000ull) {
+        char text[2048] = {0}; ssize_t n = pread(fileno(capture), text, sizeof text - 1, 0);
+        if (n > 0 && strstr(text, "the progress screen shows")) { shown = 1; break; }
+        usleep(10000);
+    }
+    fflush(stderr); dup2(saved, STDERR_FILENO); close(saved);
+    dispatch_semaphore_signal(gate->release);
+    long finished = dispatch_group_wait(callers, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+    g_dev = gate->device; unsetenv("DM_PSO_PREPARE_THREADS"); fclose(capture);
+    EXPECT("slow preparation task reached the gate", 0, entered);
+    EXPECT("progress shown while only the slow tail remains", 1, shown);
+    EXPECT("preparation completes after gate release", 0, finished);
+}
+
 int main(void) { @autoreleasepool {
     alarm(60);   // A regression in owner/waiter progress must fail rather than hang the suite.
     setenv("DM_PSO_ARCHIVE", "off", 1); setenv("DM_NVN_PREDICT", "0", 1);
@@ -302,6 +337,7 @@ int main(void) { @autoreleasepool {
     singleflight(@(dir));
     scenario(@(dir), 0); scenario(@(dir), 1);
     native_mesh(@(dir));
+    progress_with_slow_tail();
     const char *mode = getenv("DM_PSO_MTL4");
     if (mode) EXPECT("requested compiler path selected", strcmp(mode, "0") != 0, g_comp4 != nil);
     [NSFileManager.defaultManager removeItemAtPath:@(dir) error:nil];

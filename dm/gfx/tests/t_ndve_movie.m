@@ -103,9 +103,18 @@ int main(void) { @autoreleasepool {
     tex_t output_desc = {0};
     id<MTLTexture> target = ndve_image(scale, 1, S.img[5][1], &output_desc);
     if (!target || (target.usage & MTLTextureUsageShaderWrite)) return 1;
+    // The output shares a pool with CPU-written textures: mark only its own storage.
+    pool_t pool = {.size = output_desc.L.size + 8192};
+    pool.mem = malloc(pool.size); assert(pool.mem);
+    output_desc.pool = &pool; output_desc.mem = pool.mem + 4096;
     if (!ndve_scale(g_ndve_decoded, target, &output_desc)) return 1;
+    uint64_t lo = (uint64_t)(uintptr_t)pool.mem, start = lo + 4096, end = start + output_desc.L.size;
+    assert(atomic_load(&pool.gpu_written));
+    assert(gpuw_overlaps(start, end));
+    assert(!gpuw_overlaps(lo, start) && !gpuw_overlaps(end, lo + pool.size));
     g_ndve_decoded = nil;
     if (!mtl_wait(mtl_sub_commit(), 5000000000ull) || mtl_last_commit_error()) return 1;
+    gpuw_drop(lo, lo + pool.size); free(pool.mem);
 
     chain_checks(in, scale);
 
