@@ -495,3 +495,4 @@ check_t_logic: t_logic
 t_raw_residency: t_raw_residency.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_raw_residency.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 check_t_raw_residency: RUN_ENV = MTL_DEBUG_LAYER=1
+check_t_deferred_release: RUN_ENV = MTL_DEBUG_LAYER=1

@@ -754,3 +754,10 @@ Games read this count as a position in their own command memory and size their h
 - **Found on:** Ocarina of Time (Switch 2, [#1299](https://github.com/seedds/nxnative/pull/1299), v131072) on a 16 GiB M1 Pro. On the integration stack, the residency inventory changed from 9,179 MiB to 5,881 MiB, including shared buffers from 5,469 MiB to 2,123 MiB. The observations used different short runs and are not an isolated FPS benchmark. Gameplay remains below 30 FPS. The exact upstream-base branch has fixture validation; it has not been played as a standalone Ocarina build.
 - **Limits:** this does not remove private texture copies, release already pinned pools, or fix the existing fixed-size raw table; [#1360](https://github.com/seedds/nxnative/pull/1360) addresses that capacity. The integration measurement includes that fix and other Ocarina work. No iPhone or cross-game performance result is claimed.
 - **Check:** `t_raw_residency` tests late NVN address exposure, CPU-only pools staying out of residency, 1,024 retired GPU descriptors over reused storage, compatible cube-array backing and linear/sRGB aliases. `t_cpu_tex --metal` retains CPU-written pixels through finalization and command replay.
+### Deferred releases repeatedly shift pending entries
+
+- **Symptom:** a large mixed queue of completed and pending GPU references stalls cleanup on the CPU.
+- **Cause:** removing each completed entry from the middle of an array repeatedly shifts the pending tail, with quadratic cost for interleaved fences.
+- **Fix:** partition the queue once under its existing mutex, then retire ready entries outside the lock in the original reverse order. Fence eligibility, keep-resident semantics and pending order are unchanged.
+- **Found on:** Ocarina of Time (Switch 2, #1299) scene-load investigation. This PR has synthetic lifetime validation, not an isolated gameplay FPS measurement.
+- **Check:** `t_deferred_release` queues 100,000 probes with alternating fences, verifies exact release/pending order and lifetimes, then drains the remaining fence and an empty queue.
