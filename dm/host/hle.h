@@ -10,6 +10,7 @@ typedef struct { const char *name; void *fn; } hle_ent;
     static ret cname(__VA_ARGS__)
 
 typedef uint32_t Result;   // nn::Result: w0, 0 = success
+#define DM_GUEST_PROCESS_ID 0x80u   // one guest application: applet identity and authenticated HIPC sender
 #define RES_OK 0u
 #define RES_FAIL 0x2A2u      // Generic failure (cut features such as networking uniformly return this)
 
@@ -27,6 +28,8 @@ uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance
 int dm_detclock_enabled(void);
 void dm_guest_clock_advanced(void);
 uint64_t dm_guest_frame(void);        // Incremented each time the host presents a frame; unaffected by machine load
+int dm_focus_now(void);               // The front end's focus state: 1 in focus, 2 out of focus, 3 minimized (hle_oe.c)
+uint64_t dm_focus_in_since(void);    // now_ns() at its most recent entry into focus (hle_oe.c)
 void guest_clock_freeze(int on);
 void guest_clock_freeze_for(int reason, int on);   // Freeze by reason (1 background, 2 system keyboard); see hle_os.c
 void guest_clock_read_wait(void);     // A guest read of the system counter: waits while the app is in the background (hle_os.c)

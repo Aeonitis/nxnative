@@ -749,9 +749,9 @@ class Script(unittest.TestCase):
     def test_pack_command(self):
         o, tmp = self.pack_cmd('nvn')
         self.assertNotIn('--pso-pairs', o)   # no split copy
-        (tmp / 'shader').mkdir(); (tmp / 'shader/pso_pairs.tsv').write_text('v\tf\n')
+        (tmp / nsp.SHADER).mkdir(); (tmp / nsp.SHADER / 'pso_pairs.tsv').write_text('v\tf\n')
         o, tmp2 = self.pack_cmd('nvn', work=tmp)
-        self.assertEqual(o['--pso-pairs'], str(tmp / 'shader/pso_pairs.tsv'))   # the profile has no pso_pairs.tsv: the split's copy goes in
+        self.assertEqual(o['--pso-pairs'], str(tmp / nsp.SHADER / 'pso_pairs.tsv'))   # the profile has no pso_pairs.tsv: the split's copy goes in
         o, tmp = self.pack_cmd('nvn')
         self.assertEqual((o['--msl'], o['--romfs'], o['--tables'], o['--title-id'], o['--sign'], o['--marker']),
                          (str(tmp / 'shader/cache/b-0123456789ab'), str(tmp / 'ex/RomFS'), str(tmp / 'profile'), TID, '-', 'a/b'))
@@ -835,9 +835,9 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
 
     def seen(self, *logs): return nsp.seen_keys(self.g, self.sh, logs)
 
-    def build(self, seen=None, pkg='P'):
+    def build(self, seen=None, pkg='P', env=None):
         self.ran.clear()
-        return nsp.build_shaders(sys.executable, REPO, self.sh, REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate', {'WORK': str(self.tmp)}, self.logs, self.g, pkg_key=pkg, mac=True, seen=seen)
+        return nsp.build_shaders(sys.executable, REPO, self.sh, REPO / 'dm/gfx/tools/dmsh_xlate_bin/dmsh_xlate', env or {'WORK': str(self.tmp)}, self.logs, self.g, pkg_key=pkg, mac=True, seen=seen)
 
     def test_option(self):
         self.assertTrue(nsp.parse_args(['--seen-shaders']).seen_shaders); self.assertFalse(nsp.parse_args(['--no-seen-shaders']).seen_shaders)
@@ -890,12 +890,14 @@ class SeenShaders(unittest.TestCase):   # --seen-shaders: the keys, the partial 
         self.assertEqual(kmac.read_text(), 'K\nnote\n'); self.assertTrue((lib / 'inputs.tsv').is_file()); self.assertTrue((lib / 'k_b.metallib').is_file())
 
     def test_full_build_mentions_it_and_replaces_the_partial_library(self):
-        self.build(self.keys('a'))
+        bad_cache = {'WORK': str(self.tmp), 'DMSH_CAS': str(self.tmp / 'legacy-cas-directory')}
+        self.build(self.keys('a'), env=bad_cache)
+        self.assertEqual(self.ran[0][1]['DMSH_CAS'], str(self.sh / 'cache/cas.db'))
         self.assertFalse(any('--seen-shaders builds only' in m for m in self.said))
         with mock.patch.object(nsp, 'chain_tables', lambda *a: True), mock.patch.object(nsp, 'stale_shaders', lambda *a: None), mock.patch.object(nsp, 'prune_stale_chains'), mock.patch.object(nsp, 'prune_shader_cache'):
-            self.assertEqual(self.build(), self.sh / 'cache')
+            self.assertEqual(self.build(env=bad_cache), self.sh / 'cache')
         self.assertEqual(self.ran[0][0][2:], [str(self.sh / 'pkg'), str(self.sh / 'cache')])   # no key: the whole map
-        self.assertNotIn('DMSH_CAS', self.ran[0][1])
+        self.assertEqual(self.ran[0][1]['DMSH_CAS'], str(self.sh / 'cache/cas.db'))
         self.assertTrue(any('building the whole shader map, 4 shaders' in m and '--seen-shaders builds only the 2' in m for m in self.said))
         self.assertFalse((self.sh / 'partial').exists())
 

@@ -1,5 +1,6 @@
 """Packer/cache round trips and the index validator shared by host mounts and iOS startup; synthetic files only."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil

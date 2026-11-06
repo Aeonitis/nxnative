@@ -197,7 +197,11 @@ def bahs_shaders(d, label):
         st = nvn2_stage(ctl, code) if nvn2 else 'cs' if code[:4] == CS_MAGIC else sph_stage(code) if code[:4] == GFX_MAGIC else None
         if not st or check(label, st, ctl, code): continue
         out.append((f'{label}#BAHS@{a:#x}', st, ctl, code))
-    bahs_variations(d, label, [o[0] for o in out])
+    records = bahs_variations(d, label, [o[0] for o in out])
+    if records is not None:
+        # A matching word sequence in control metadata is not a binary-table record.
+        # Ocarina's agl_common had one pointing a real control section at unrelated data.
+        out = [o for o in out if int(o[0].rsplit('@', 1)[1], 16) in records]
     return out
 
 def sead_prim_shaders(d, label):
@@ -267,7 +271,8 @@ def bahs_variations(d, label, entries):
     (0 vertex, 1 fragment, 3 compute), two u32, the 16-byte entry bahs_shaders reads) and right after it a program array (u32 byte size, u32 count, then per program: u32 record size,
     u32 name length, u32 stage mask, u32 index of its first binary, its name, its macros). A program's binaries run from its first index to the next program's; the n-th vertex binary
     and the n-th fragment binary in that range are one variation. Breath of the Wild: 109 of the 543 pairs drawn on a cold start in Zora's Domain came from these files, and none was in
-    shader_pairs.tsv, which paired only BNSH variations. A file whose arrays do not read back (another layout, or an entry bahs_shaders took that no record holds) gives no pairs"""
+    shader_pairs.tsv, which paired only BNSH variations. Return the verified binary-record offsets too, so discovery excludes stray scan matches outside the array.
+    A file whose arrays do not read back (another layout) gives no pairs and returns None, leaving discovery unchanged"""
     if not entries: return
     taken = {int(e.rsplit('@', 1)[1], 16) for e in entries}
     arr = min(taken) - 0x18
@@ -300,6 +305,7 @@ def bahs_variations(d, label, entries):
             if k > 1: continue   # compute and the other kinds pair with nothing
             if a in taken: BAHS_VAR[f'{label}#BAHS@{a:#x}'] = f'{label}#BAHS#prog{p}#var{seen[k]}'
             seen[k] += 1
+    return {a for a, _ in recs}
 
 def mshd_shaders(d, label):
     out, c = [], d.find(CTL_MAGIC)
