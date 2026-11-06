@@ -37,6 +37,9 @@ sys_resource	0x3000000
 
 # ---- Rendering ----
 render_cond	on
+# The texture pool holds about 33,000 IDs and a scene change leaves the old scene's finalized textures registered: without this each pool table rebuild made their
+# textures again (1,500 textures, 2.5 GB) and GPU memory passed Metal's working set leaving Link's house (PR #1393, docs/reference/nvn-objects.md)
+pool_skip_retired	on
 
 # ---- Shader split ----
 shader_groups	/Shader/ApplicationPackage=layout /Shader/=shader /Layout2Shader/=layout /Effect/=effect /Lib/=lib /UI/=layout
