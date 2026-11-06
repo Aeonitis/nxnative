@@ -1891,3 +1891,10 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Cause:** an availability check does not provide declarations absent from the compiling SDK.
 - **Fix:** declare the setter-only Objective-C protocol and send the same selectors under the existing OS 27 check. This changes the compile-time declaration, not the scaler's work or shader output.
 - **Found on:** the NVN memory fixture build on macOS 26.5.2, Xcode 26.5. The non-origin temporal-scaler path was not run.
+### NDVE network shaders need bounded archive parsing
+
+- **Symptom:** video-enhancement shaders are missing from a shader split, or a byte-pattern scan pairs data with an unrelated control header.
+- **Cause:** NDVE v5 wraps a separate NDSR pack and network archive. Magic bytes alone do not describe member boundaries or weight/control/code ownership.
+- **Fix:** validate the outer version, parameter-table extent and declared member lengths, the trailing `1ALR` index, non-overlapping archive members and each network's weight and shader ranges. Require a valid compute control header and matching code length. Discover the format in loose and compressed files. NDSR entry-walk improvements remain separate (#1388).
+- **Found on:** Ocarina of Time video-enhancement investigation (#1299); this supplies the structured archive reader, without adding the game profile.
+- **Check:** `test_ndve_bounded.py` uses synthetic archives to check discovery, key preservation, loose/compressed scanning and rejection of truncated, overlapping or inconsistent records.

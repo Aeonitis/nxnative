@@ -241,29 +241,46 @@ def ndsr_shaders(d, label):
     return out
 
 def ndve_shaders(d, label):
-    """Nintendo's video enhancement files (Movie/Ndve/*.dat.zs, Ocarina of Time: 'NDVE', a 0x28-byte header, then an NDSR block whose offsets count from its own start): the upscaler's
-    NVN2 programs. The NDSR record table names only some of them (its words are not a regular array: a control offset, control length << 4 | type, code offset triple sits at any word),
-    so every NVN2 control section in the file is a shader: its code area is the one a table triple names for it (NDSR base + code offset), else the one +0x30 of the control section
-    points at, relative to it (the host fills that word in memory, and the key hashes it as zero). A control section that gets neither is left out. The stage comes from the code's SPH"""
+    """NDVE v5: parameter pairs, an NDSR pack and a 1ALR-indexed archive of compute networks.
+    The game's loader validates the outer lengths, seeks to the archive index from its last eight bytes,
+    and reads each network's weight ranges and {offset, control length, code length, reserved} records.
+    Found in Ocarina of Time's video enhancement data; offsets are relative to their containing member.
+    """
     if d[:4] != b'NDVE': return []
-    base = d.find(b'NDSR', 0, 0x100)
-    if base < 0: return []
-    words = struct.unpack_from('<%dI' % ((min(len(d), base + 0x100) - base) // 4), d, base)
-    named = {base + words[i]: base + words[i + 2] for i in range(len(words) - 2) if base + words[i] + 0x48 <= len(d) and nvn2_ctl(d[base + words[i]:base + words[i] + 0x48])}
-    out = []
-    for m in re.finditer(CTL_MAGIC + b'\xc9\0\0\0', d):
-        c = m.start()
-        if c + 0x48 > len(d) or not nvn2_ctl(d[c:c + 0x48]): continue
-        rel = struct.unpack_from('<I', d, c + 0x30)[0]
-        k = named.get(c, c + rel if rel else None)
-        if k is None: continue
-        ctl = d[c:c + 0xd8]   # an NVN2 control section is 0xd8 bytes (the key hashes its first 0x48; the stage byte is at +0x56)
-        n = struct.unpack_from('<I', ctl, 0x44)[0]
-        code = d[k:k + n]
-        if len(code) != n: continue
-        st = nvn2_stage(ctl, code)
-        if st is None or check(label, st, ctl, code): continue
-        out.append((f'{label}#NDVE@{c:#x}', st, ctl, code))
+    version, reserved, ns, na, np = field(d, '<5I', 4, f'{label} NDVE header')
+    if version != 0x0ff00005 or reserved: red(f'{label}: unsupported NDVE header')
+    start = 24 + 8 * np
+    if start + ns + na != len(d): red(f'{label}: NDVE member lengths do not cover the file')
+    pack = span(d, start, ns, f'{label} NDVE NDSR')
+    if pack[:4] != b'NDSR': red(f'{label}: NDVE has no NDSR pack')
+    archive = span(d, start + ns, na, f'{label} NDVE archive')
+    index, magic = field(archive, '<I4s', na - 8, f'{label} NDVE archive footer') if na >= 8 else (0, b'')
+    if magic != b'1ALR': red(f'{label}: NDVE archive has no 1ALR footer')
+    _, count = field(archive, '<2I', index, f'{label} NDVE archive index')
+    if count > 64 or index + 8 + count * 12 != na - 8: red(f'{label}: invalid NDVE archive index')
+    out, occupied = [], []
+    for i in range(count):
+        kind, off, size = field(archive, '<3I', index + 8 + 12 * i, f'{label} NDVE member {i}')
+        if off + size > index or any(off < b and a < off + size for a, b in occupied): red(f'{label}: overlapping or out-of-bounds NDVE members')
+        occupied.append((off, off + size))
+        member = span(archive, off, size, f'{label} NDVE member {i}')
+        nk, nw = field(member, '<2I', 0, f'{label} NDVE network {i}')
+        header = 8 + 8 * nw + 16 * nk
+        if not nk or header > size: red(f'{label}: invalid NDVE network table')
+        ranges = [(0, header)]
+        def extent(a, n, header=header, size=size, ranges=ranges):
+            if a < header or a + n > size or any(a < y and x < a + n for x, y in ranges): red(f'{label}: overlapping or out-of-bounds NDVE network data')
+            ranges.append((a, a + n))
+        for j in range(nw):
+            a, n = field(member, '<2I', 8 + 8 * j, f'{label} NDVE weight {j}')
+            extent(a, n)
+        for j in range(nk):
+            a, nc, nz, flags = field(member, '<4I', 8 + 8 * nw + 16 * j, f'{label} NDVE shader {j}')
+            extent(a, nc + nz)
+            ctl, code = member[a:a + nc], member[a + nc:a + nc + nz]
+            if flags or nc < 0x68 or not nvn2_ctl(ctl) or nvn2_stage(ctl, code) != 'cs' or check(label, 'cs', ctl, code): red(f'{label}: invalid NDVE compute shader {j}')
+            out.append((f'{label}#NDVE{kind}@{off + a:#x}', 'cs', ctl, code))
+    out.extend(ndsr_shaders(pack, label + '#NDVE/NDSR'))
     return out
 
 BAHS_VAR = {}   # BAHS entry label → the program variation it belongs to (bahs_variations; var_pairs pairs by it)
@@ -2857,7 +2874,7 @@ def scan_file_in(args):
         try: pairs = unity_shaders(d, '/' + rel, found, trees if not TREES else dict(TREES))
         except unityfs.NoTree: return rel, {}, set(), 'defer'
         return rel, uniq_keys(found), var_pairs(found) | {(a, b, 'prog') for a, b in pairs}, trees
-    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'MSHD' and d[:4] != b'NDVE' and d[:4] != b'NARC' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
+    elif b'BNSH\0\0\0\0' not in d and b'BAHS' not in d and d[:4] != b'NDVE' and d[:4] != b'MSHD' and d[:4] != b'NARC' and not (d[:4] == b'SARC' and b'Yaz0' in d) and b'\x91\x68\x86\x19' not in d and MGFX not in d and NEEDLE not in d and d[:8] != SUMO_MUX and SUMO_NX not in d and NVNSH not in d: return rel, {}, set(), {}   # a SARC may hold Yaz0 members, a NARC packed ones (cra.undo)
     else:
         scan_blob(d, '/' + rel, found)
         # whole GLSLC outputs in a file no other reader takes (FINAL FANTASY TACTICS - The Ivalice Chronicles: its engine's technique files, resources_nx/…/shader/*.tec, 261 outputs beside
