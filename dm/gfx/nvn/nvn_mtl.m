@@ -2318,7 +2318,7 @@ static void pkg_absorb_take(NvPkg *pk, const tex_t *t) {
 // not say which images a shader will use atomically
 static inline int pf_r32i(MTLPixelFormat pf) { return pf == MTLPixelFormatR32Uint || pf == MTLPixelFormatR32Sint; }
 static MTLTextureUsage img_usage(const tex_t *t, MTLPixelFormat pf) {
-    if (!(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE)) return 0;
+    if (!(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) || fmt_compressed(t->d.format)) return 0;   // block encoders write uncompressed aliases
     return MTLTextureUsageShaderWrite | (pf_r32i(pf) ? MTLTextureUsageShaderAtomic : 0);
 }
 // Metal leaves MTLTextureUsageShaderAtomic out of a texture's usage property (0x3 for a texture made with 0x23), so it cannot be read back: every shader-writable R32Uint / R32Sint
@@ -5587,7 +5587,22 @@ void mtl_set_origin_lower_left(int on) { if (atomic_exchange(&g_origin_ll, on) !
 static int g_queue_origin_ll;   // SET_WINDOW_ORIGIN's raster flip is queue state, independent of later device-origin changes.
 void mtl_set_queue_origin_lower_left(int on) { g_queue_origin_ll = on != 0; }
 void mtl_set_tex_pool_n(int n) { g_tpool_n = n; }
-static id<MTLTexture> treg_tex(const treg_t *r) { return r->gone ? tex_made(&r->t) : tex_mtl(&r->t); }   // Caller holds g_rmu
+// A pool walk may reach stale registered descriptors after their object was finalized and
+// their storage reused. It must not recreate zero-filled GPU textures for those IDs:
+// creation takes over aliases, invalidates the whole table, and the next walk repeats it.
+// Existing backing, CPU uploads, live objects and command-record snapshots still resolve.
+static id<MTLTexture> treg_tex(const treg_t *r) {   // Caller holds g_rmu
+    if (r->gone) return tex_made(&r->t);
+    if (r->retired && !tex_made(&r->t) && !tex_from_storage(&r->t) && !tex_cpu_content(&r->t)) {
+        alias_key k; memset(&k, 0, sizeof k); k.pool = (uint64_t)(uintptr_t)r->t.pool; k.off = r->t.off; k.d = r->t.d; k.d.flags &= ~NVN_TEXTURE_FLAGS_IMAGE;
+        pthread_mutex_lock(&g_smu); int held = nvn_hm_get(&g_alias, &k) != NULL;
+        const uint8_t *twins = srgb_twins(k.d.format);
+        for (int i = 0; !held && i < 4 && twins[i]; i++) { k.d.format = twins[i]; held = nvn_hm_get(&g_alias, &k) != NULL; }
+        pthread_mutex_unlock(&g_smu);
+        if (!held) return nil;
+    }
+    return tex_mtl(&r->t);
+}
 // The upload stamp of the packaged texture an ID's view was made from (tex_by_id's guest-write shortcut); none for sparse ones (their page table changes too) or another base. Caller holds g_rmu
 static void treg_pkg_stamp(treg_t *rp, id<MTLTexture> base) {
     rp->view_span = NULL; if (!rp->view_pkg) return;
@@ -8255,13 +8270,23 @@ static uint64_t g_stat_pool_why[4];   // why a pool table was built: no snapshot
 // FANTASY RESONANCE did later (GitHub issue #934; treg_gone, tex_mtl_ now stop that on every route). So: its memory pool object is live (nvnMemoryPoolFinalize clears the magic; freed
 // and reused memory does not hold it) and an ordinary pool's storage lies in a pool the host maps (mtl_addr; otherwise the upload would read the guest address on the CPU)
 static int tex_storage_live(const tex_t *t) {
-    const pool_t *p = t->pool; void *mb; uint64_t mo;
+    const pool_t *p = t->pool;
     if (p && p->magic != MAGIC('P', 'O', 'O', 'L')) return 0;
     if (p && nvn_sparse_pool(p)) return 1;
-    (void)mb; (void)mo;
     // Only whether the storage is mapped: mtl_addr would put the pool into the residency set, and this runs for every registered texture of a pool walk, so every pool holding a
     // registered texture stayed wired whole (Ocarina of Time: 5.3 GB of pools on top of 6.4 GB of textures)
     return mtl_addr_mapped((uint64_t)(uintptr_t)t->mem, t->L.size ? t->L.size : 1);
+}
+// Cube storage is a 2D array in this backend. It must remain eligible for the
+// 2D-array handle table (probe analysis reads cube faces that way).
+static int ttype_class(long t) { return (t >= 0 && t <= 3) || t == 5 || t == 6 ? 0 : t == 4 || t == 8 ? 1 : t == 7 ? 3 : -1; }
+// A bindless pool of one texture class cannot reach another. Reject those IDs
+// before resolving their storage: otherwise a cube-only draw uploads every 2D
+// texture too. Keep compatible dimensional reinterpretations and explicit views.
+static int ttype_apart(const treg_t *r, int dtt) {
+    int target = r->has_v && r->v.set_target ? r->v.target : r->t.d.target;
+    int a = ttype_class((long)ttype(target, -1)), b = ttype_class(dtt);
+    return a >= 0 && b >= 0 && a != b;
 }
 // Profile key pool_skip_retired (DM_NVN_POOL_SKIP_RETIRED=1 / 0 overrides it): an ID whose texture the game has finalized (retired) and that holds no view gets the dummy in a pool
 // table, rather than a Metal texture made again from its storage. The walk covers every registered ID (Ocarina of Time: about 33,000 in its texture pool), and at a scene change the
@@ -8275,6 +8300,7 @@ static uint64_t pool_entry(int samp, int dtt, int id_, int *gone, int *transient
     if (id_ <= 0) return 0;
     if (samp) return id_ < g_nsreg && g_sreg_ok[id_] && samp_fast(id_) ? g_srid[id_] : 0;
     if (id_ >= g_ntreg || !g_treg[id_].ok) return 0;
+    if (ttype_apart(&g_treg[id_], dtt)) return 0;   // another texture class: not reachable from this table (PR #1404)
     if (g_treg[id_].gone || (!g_treg[id_].view && !tex_storage_live(&g_treg[id_].t))) { ++*gone; return 0; }
     if (g_treg[id_].retired && !g_treg[id_].view && pool_skip_retired()) { ++*skipped; return 0; }
     void *tv = NULL; uint64_t tr = tex_fast_rid(id_, &tv);
