@@ -1390,8 +1390,14 @@ def finish(key, w, j, c1):
     try: src = pool_arrays(src)   # handles traced to no slot read the pools the replay keeps (see pool_arrays)
     except ValueError as e: return 'pool rewrite failed', str(e)[:160], None
     src = dmsh_wide.wide_loads(src)   # storage words the translator split, read whole again (see dmsh_wide.py)
+    res = json.load(open(os.path.join(w, key + '.res.json')))
+    if dmsh_chain.raw_load_quads() and j['stage'] == 'cs' and j.get('arch') == 'sm86' and not j.get('mesh_stage'):
+        sbufs = sorted(res['sbufs'], key=lambda b: b['binding'])
+        raw = [(i, b) for i, b in enumerate(sbufs) if b['cb_slot'] == abi.GMEM_MAP_CB_SLOT]
+        if len(raw) == 1 and raw[0][1]['cb_offset'] == 0 and not raw[0][1]['flags'] & 1:
+            src = dmsh_wide.raw_load_quads(src, raw[0][0], abi.GMEM_MAP_ENTRIES, abi.GMEM_MAP_ENTRY)
     src = border_emu(src)   # border colours Metal lacks (see border_emu)
-    src = dmsh_depth.bounded(src); open(msl, 'w').write(src)   # nested early exits flattened within Metal's bracket depth (dmsh_depth.py); after wide_loads, whose runs must not cross the exits
+    src = dmsh_depth.bounded(src); open(msl, 'w').write(src)   # nested early exits flattened within Metal's bracket depth (dmsh_depth.py); after wide_loads and raw_load_quads, whose runs must not cross the exits
     first, spill = [], 0
     mesh = j.get('mesh_stage')
     if mesh:   # the kernel as the Metal object or mesh function (dmsh_meshstage.py)
@@ -1410,7 +1416,6 @@ def finish(key, w, j, c1):
         src, pad = vs_pad(key, src)
         if pad: open(msl, 'w').write(src)
     lay = None; discard = False
-    res = json.load(open(os.path.join(w, key + '.res.json')))
     if j['stage'] == 'vs':   # the two depth-convention entry points (see vs_depth); the analysis below uses the source with only main0
         capture = dmsh_geometry.capture(src)
         src, full = vs_depth(src)
