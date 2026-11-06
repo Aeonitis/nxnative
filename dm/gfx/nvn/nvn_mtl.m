@@ -797,6 +797,26 @@ static int big_new(big_pool *b, uintptr_t lo, uintptr_t hi, uintptr_t end, uint6
     [g_keep addObject:buf];
     return g_npool - 1;
 }
+// Once raw-address shaders need a whole-pool mapping, chunks and their older
+// replacements are redundant. Retire them after the submissions using them finish.
+static void big_full(big_pool *b) {   // caller holds g_mu
+    if (b->full) return;
+    int full = big_new(b, b->a, b->b, b->b, 0);
+    if (full < 0) return;
+    b->full = full + 1;
+    for (int i = 0; i < g_npool;) {
+        pool_ent *p = &g_pools[i];
+        if (p->key != b->mem || i == b->full - 1) { i++; continue; }
+        [g_keep removeObject:p->buf]; defer_obj_release(p->buf);
+        if (p->res) g_pool_res_n--;
+        g_pools[i] = g_pools[--g_npool];
+        if (i < g_npool) big_moved(i);
+    }
+    for (id<MTLBuffer> old in b->old) defer_obj_release(old);
+    [b->old removeAllObjects];
+    memset(b->chunk, 0, (((b->b - b->a) >> 24) + 1) * sizeof *b->chunk);
+    g_plast = -1; g_pidx_ok = 0;
+}
 // The entry of a large pool for [addr, addr + len): the chunk of its stride, made or lengthened to reach as far as asked; -1 past the pool's end
 static int big_lookup(big_pool *b, uint64_t addr, uint64_t len) {
     if (addr + len > b->hi) return -1;
@@ -8589,7 +8609,7 @@ static uint64_t gmem_map_gpu(void) {
     int n = 1, over = 0; uint64_t end = 0, over_lo = 0, over_bytes = 0;
     pthread_mutex_lock(&g_mu);
     int nbm = -1, skipped = 0; uint64_t skipped_mb = 0; bm_iv *bm = gmem_all() ? NULL : bm_sorted(&nbm);   // the marks (g_bm_mu is taken under g_mu, never the other way)
-    for (int k = 0; k < g_nbig; k++) if (!g_big[k].full && bm_overlaps(bm, nbm, g_big[k].lo, g_big[k].hi)) { int n = big_new(&g_big[k], g_big[k].a, g_big[k].b, g_big[k].b, 0); if (n >= 0) g_big[k].full = n + 1; }   // the pool table reaches all of a large pool
+    for (int k = 0; k < g_nbig; k++) if (bm_overlaps(bm, nbm, g_big[k].lo, g_big[k].hi)) big_full(&g_big[k]);   // the pool table reaches all of a large pool the game took a buffer address in (#1394), its chunks retired (#1417)
     gen = atomic_load(&g_pool_gen); pidx_sort();
     uint64_t (*rng)[3] = malloc(((size_t)g_npool + 1) * sizeof *rng); if (!rng) abort();   // the ranges (start, end, delta), taken under g_mu and written into the table after it
     for (int k = 0; k < g_npool; k++) {
