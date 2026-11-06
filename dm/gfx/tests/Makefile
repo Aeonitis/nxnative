@@ -499,3 +499,8 @@ check_t_deferred_release: RUN_ENV = MTL_DEBUG_LAYER=1
 t_pool_retire: t_pool_retire.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_pool_retire.m $(MTL_T_SRC) $(FW)
 check_t_pool_retire: RUN_ENV = MTL_DEBUG_LAYER=1
+t_texture_quality: t_texture_quality.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_texture_quality.m $(MTL_T_SRC) $(FW)
+check_t_texture_quality: t_texture_quality
+	DM_NVN_TEX_MIP_SKIP=0 MTL_DEBUG_LAYER=1 ./t_texture_quality
+	@for levels in 1 2 3; do DM_NVN_TEX_MIP_SKIP=512 DM_NVN_TEX_MIP_LEVELS=$$levels MTL_DEBUG_LAYER=1 ./t_texture_quality || exit $$?; done
