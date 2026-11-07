@@ -585,3 +585,7 @@ t_tg_spill: t_tg_spill.m $(MTL_T_DEP)
 check_t_tg_spill: t_tg_spill
 	MTL_DEBUG_LAYER=1 DM_NVN_DISPATCH_OWN=0 ./$<
 	MTL_DEBUG_LAYER=1 DM_NVN_DISPATCH_OWN=1 ./$<
+
+t_sparse_pool_cache: t_sparse_pool_cache.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_pool_cache.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
+check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1
