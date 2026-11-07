@@ -88,7 +88,7 @@ typedef struct thr {
     // SVC exit without G: bit 0 = inside an SVC, bit 1 = a pause was requested. The exit clears bit 0 with one compare-and-swap when bit 1 is clear, and takes G only otherwise;
     // the requester sets bit 1 and treats the thread as stopped only if bit 0 was set, so a thread it counts as stopped in an SVC cannot leave the SVC without G (svc_regs stays valid for GetThreadContext3)
     _Atomic int svc_state;
-    const sync_ref_t *wobjs; int wn, widx;   // Retained objects and completed index, independent of handle reuse and guest memory
+    sync_ref_t wobjs[MAX_SYNC_OBJECTS]; int wn, widx;   // WaitSynchronization's retained objects (the first wn) and the index the completing signal recorded, independent of handle reuse and guest memory (Horizon: KThread's sync object buffer)
     int ctx_ok; uint64_t ctx_x[29], ctx_fp, ctx_lr, ctx_sp, ctx_pc; uint32_t ctx_pstate, ctx_fpcr, ctx_fpsr; __uint128_t ctx_v[32];
     pthread_cond_t pcv;
 } thr_t;
@@ -1150,7 +1150,7 @@ static int svc_thread_impl(int num, uint64_t *regs) {
         thr_t *t = cur(); int n = (int)regs[2]; int64_t ns = (int64_t)regs[3];
         if (n < 0 || n > MAX_SYNC_OBJECTS) { regs[0] = R_OUT_OF_RANGE; regs[1] = 0; return 1; }
         int64_t wait_ns = poll_wait_begin(ns);
-        uint32_t hs[MAX_SYNC_OBJECTS]; sync_ref_t objects[MAX_SYNC_OBJECTS];
+        uint32_t hs[MAX_SYNC_OBJECTS]; sync_ref_t *objects = t->wobjs;
         if (n) memcpy(hs, (const void *)regs[1], n * sizeof *hs);
         pthread_mutex_lock(&G);
         int held = 0, idx = -1; int64_t r = R_BAD_HANDLE;
@@ -1162,9 +1162,9 @@ static int svc_thread_impl(int num, uint64_t *regs) {
             else if (!ns) r = R_TIMEOUT;
             else if (t->cancel) { t->cancel = 0; r = R_CANCELLED; }
             else {
-                t->wobjs = objects; t->wn = n; t->widx = -1;
+                t->wn = n; t->widx = -1;
                 r = block(t, 4, wait_ns); idx = t->widx;
-                t->wobjs = NULL; t->wn = 0;
+                t->wn = 0;
             }
         }
         for (int i = 0; i < held; i++) sync_close(objects[i]);
