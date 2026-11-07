@@ -1,0 +1,5 @@
+# Benchmark routes for scripts/bench.py: name, DM_KEYS (seconds from host start), measuring window start and length (s), description.
+save-idle		30	20	User gameplay save; no input; validate screenshot before comparing.
+probe	20:A*5/4	20	100	title screen, A five times from 20 s: for finding the load time (screenshots)
+house	20:A*5/4	80	30	title screen, A five times from 20 s loads the save into Link's house by about 70 s; measures 80-110 s in the house, no input
+house-move	20:A*5/4,82:RRight~4,87:LUp~3,91:RLeft~4,96:LLeft~3,100:LDown~3,104:RRight~6,111:LRight~3,115:LUp~4	80	40	the house save: from 82 s the camera turns right, Link walks, the camera turns left, he walks left, back, the camera turns again and he walks right and forward; measures 80-120 s

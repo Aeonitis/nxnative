@@ -5229,7 +5229,11 @@ static void pso_user_record(const char *fmt, ...) {
 // Build the library from a .metallib file without permanently occupying a file descriptor: newLibraryWithURL keeps that file open for as long as the library object lives (one per game shader - of the 258 descriptors the iOS app permanently holds in a run, 213 are these,
 // while the default soft limit of an iOS process is 256; new shaders created in other acts raise it further). Here the file is mapped into memory and closed immediately, and the library is built from the in-memory data; the mapping is released when the library's data object is freed
 static __thread int t_lib_layer;
-static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {
+static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err);
+static id<MTLLibrary> lib_from_file(NSString *path, NSError **err) {   // labelled with its file name: what cap_fn_key matches, one library object per load
+    id<MTLLibrary> l = lib_from_file_(path, err); if (l) l.label = path.lastPathComponent; return l;
+}
+static id<MTLLibrary> lib_from_file_(NSString *path, NSError **err) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY); struct stat st;
     if (fd < 0) {   // not in the folder: the library's image, whose one descriptor is shared, and only this file's pages are mapped
         int open_errno = errno; romfs_img *img; const img_ent *x = msl_image_file(path, &img); msl_map f;
@@ -7468,14 +7472,68 @@ static ArchEpoch *ep_enter(void) {   // the current period, joined: a flush hand
     return ep;
 }
 static void ep_leave(ArchEpoch *ep) { atomic_fetch_sub(&ep->active, 1); dispatch_group_leave(ep->busy); }
+// Capture compiles that share a stage function run one at a time. Every compile of a period's compiler looks its stage programs up in that period's capture archive (Metal's
+// MultiLevelAirntBinaryCache::getElementAtDestination: -[_MTLBinaryArchive getBinaryDataForKey:reflectionType:], then -data of the entry it returns unretained); a compile
+// that captures the same program at that moment frees the entry, and the lookup messages a freed object (SIGSEGV, objc_msgSend, 'possible pointer authentication failure';
+// issue #815). Pairs share vertex shaders (Ocarina of Time: 33,365 pairs, 15,850 vertex shaders, runs of up to 996 pairs with the same one), so concurrent compiles of
+// one vertex program were common: three of three prebuilds on an M2 Max (macOS 27.2) crashed, the earliest 2 s in. The key is the stage's library function (cap_fn_key)
+// Every library the host compiles pipelines from comes from lib_from_file, so the address fallback below only keys a library some future loader makes another way: such a
+// loader must label its libraries, or the lock never matches (one library object per load). A specialized function is keyed by its function alone, which holds back
+// compiles of other specializations of it too (rare: the pairs a bundled archive leaves to the device). The prebuild's pulling bases come from <key>_bp.metallib and a
+// draw's bases with a vertex layout from <key>_b.metallib: different labels, so the prebuild (prepare step or background) never holds a draw's compile back
+static NSString *cap_fn_key(MTL4FunctionDescriptor *fd) {
+    MTL4FunctionDescriptor *f = fd;
+    if ([f isKindOfClass:MTL4SpecializedFunctionDescriptor.class]) f = ((MTL4SpecializedFunctionDescriptor *)f).functionDescriptor;
+    if ([f isKindOfClass:MTL4LibraryFunctionDescriptor.class]) { MTL4LibraryFunctionDescriptor *l = (MTL4LibraryFunctionDescriptor *)f; NSString *lk = l.library.label; return lk.length ? [NSString stringWithFormat:@"%@\t%@", lk, l.name] : [NSString stringWithFormat:@"%p\t%@", (__bridge void *)l.library, l.name]; }
+    return f ? [NSString stringWithFormat:@"%p", (__bridge void *)f] : nil;
+}
+static NSCountedSet<NSString *> *g_cap_fns; static pthread_mutex_t g_cap_fn_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_cap_fn_cv = PTHREAD_COND_INITIALIZER;
+static _Atomic uint64_t g_cap_fn_waits, g_cap_fn_late, g_cap_fn_wait_ns, g_cap_fn_wait_max, g_cap_fn_sub_waits, g_cap_fn_sub_ns;   // and the time waited (sum, longest), the submit thread's waits
+static __thread int t_cap_submit;   // this thread is the submit thread (pso_get's draws), whose waits are frame time
+//   // capture compiles that waited for another of the same stage function; of them, those that went on after CAP_FN_WAIT_MS
+// The wait is bounded: a compile Apple's compiler never finishes must not hold the others back (t_pso_stall, t_pso_archive's concurrent bases). A base takes well under a second,
+// so after 2 s the compile goes on beside the slow one
+enum { CAP_FN_WAIT_MS = 2000 };
+static void cap_fns_take(NSString *a, NSString *b) {   // waits until no capture compile under way has either function, or CAP_FN_WAIT_MS, then holds both
+    pthread_mutex_lock(&g_cap_fn_mu);
+    if (!g_cap_fns) g_cap_fns = [NSCountedSet set];
+    int waited = 0, late = 0; uint64_t t0 = 0, cap = (uint64_t)CAP_FN_WAIT_MS * 1000000ull;
+    while ((a && [g_cap_fns containsObject:a]) || (b && [g_cap_fns containsObject:b])) {
+        if (!waited) { waited = 1; t0 = bp_now(); }
+        uint64_t el = bp_now() - t0;   // the monotonic clock: a wall-clock step changes no cap
+        if (el >= cap) { late = 1; break; }
+        uint64_t left = cap - el; struct timespec rel = {(time_t)(left / 1000000000ull), (long)(left % 1000000000ull)};
+        pthread_cond_timedwait_relative_np(&g_cap_fn_cv, &g_cap_fn_mu, &rel);
+    }
+    if (a) [g_cap_fns addObject:a];
+    if (b) [g_cap_fns addObject:b];
+    pthread_mutex_unlock(&g_cap_fn_mu);
+    if (!waited) return;
+    uint64_t w = bp_now() - t0, m = atomic_load(&g_cap_fn_wait_max);
+    atomic_fetch_add(&g_cap_fn_waits, 1); atomic_fetch_add(&g_cap_fn_wait_ns, w);
+    while (w > m && !atomic_compare_exchange_weak(&g_cap_fn_wait_max, &m, w)) {}
+    if (late) atomic_fetch_add(&g_cap_fn_late, 1);
+    if (t_cap_submit) { atomic_fetch_add(&g_cap_fn_sub_waits, 1); atomic_fetch_add(&g_cap_fn_sub_ns, w); }
+}
+static void cap_fns_give(NSString *a, NSString *b) {
+    pthread_mutex_lock(&g_cap_fn_mu);
+    if (a) [g_cap_fns removeObject:a];
+    if (b) [g_cap_fns removeObject:b];
+    pthread_cond_broadcast(&g_cap_fn_cv);
+    pthread_mutex_unlock(&g_cap_fn_mu);
+}
 // A compile the archive captures, in the current flush period, counted there when it built (vd: the base has a vertex layout). No task options: a captured base never imports
 // archive entries (see the compaction crash below)
 static id<MTLRenderPipelineState> arch_capture(MTL4RenderPipelineDescriptor *d, NSError **e, int vd) {
     if (!g_arch_cap) return [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
+    NSString *vf = cap_fn_key(d.vertexFunctionDescriptor), *ff = cap_fn_key(d.fragmentFunctionDescriptor);
+    if (ff && vf && [ff isEqualToString:vf]) ff = nil;
+    cap_fns_take(vf, ff);
     ArchEpoch *ep = ep_enter();
     id<MTLRenderPipelineState> ps = [ep->comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
     if (ps) { atomic_fetch_add(&ep->n, 1); atomic_fetch_add(&g_arch_new, 1); if (vd) { atomic_fetch_add(&ep->vd, 1); atomic_fetch_add(&g_arch_new_vd, 1); } }
     ep_leave(ep);
+    cap_fns_give(vf, ff);
     return ps;
 }
 // The same for a compute pipeline (cps_new). It counts as a base with a vertex layout does: its file is a plain one, never a p<seq> file, so its lookups skip the prebuild's files
@@ -7950,6 +8008,10 @@ void mtl_pso_line(char *o, size_t n) {
     o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, "; draws that waited:");
     for (int i = 0; i < 5; i++) if (g_pw_n[i] > pn[i]) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, " %s %llu / %.1f ms,", g_pw_why[i], (unsigned long long)(g_pw_n[i] - pn[i]), (g_pw_ns[i] - pns[i]) / 1e6);
     memcpy(pn, g_pw_n, sizeof pn); memcpy(pns, g_pw_ns, sizeof pns);
+    static uint64_t pfw, pfs, pfsn; uint64_t fw = g_cap_fn_waits, fs = g_cap_fn_sub_waits, fsn = g_cap_fn_sub_ns;   // cap_fns_take: compiles that waited for one of the same stage function
+    if (fw > pfw) o2 += snprintf(o + o2, n > o2 ? n - o2 : 0, " capture compiles that waited for another of the same shader %llu (on the submit thread %llu / %.1f ms; longest wait so far %.1f ms),",
+                                 (unsigned long long)(fw - pfw), (unsigned long long)(fs - pfs), (fsn - pfsn) / 1e6, g_cap_fn_wait_max / 1e6);
+    pfw = fw; pfs = fs; pfsn = fsn;
     static uint64_t pca, pcr, pcb, pcl, pcn; uint64_t ca = g_cps_arch, cr = g_cps_run, cb = g_cps_built, cl = g_cps_look_ns, cn = g_cps_build_ns;   // compute pipelines (cps_new)
     if (ca > pca || cr > pcr || cb > pcb)
         snprintf(o + o2, n > o2 ? n - o2 : 0, "; compute pipelines from the archive bundled with the app %llu, from this device's archive %llu, built %llu (%.1f ms looking up, %.1f ms building)",
@@ -7965,6 +8027,8 @@ void mtl_pso_line(char *o, size_t n) {
 // (DM_PSO_PREBUILD=0: not at all), or as a tool on the Mac (DM_PSO_PREBUILD=tool: build, write, exit). Vertex shaders that write the layer, pairs whose vertex shader has stage
 // inputs but no pulling library, and integer-output or multisampled bases are left to the draws. An app that bundles these bases made offline (DM_PSO_BUNDLE, pso_bundle_covers)
 // builds none of them, only the pairs that archive left to the device (rest_pairs.tsv beside it: functions with constants)
+enum { PRE_CHUNK = 256 };   // pairs a prebuild worker takes at a time
+static _Atomic int g_pre_chunk;   // the next chunk's first pair
 static _Atomic int g_pre_running; static _Atomic int g_pre_next, g_pre_done, g_pre_built, g_pre_archived, g_pre_skipped, g_pre_failed;   // g_pre_next: pairs handed to a worker
 // Pairs whose base failed to build, kept with the system build and the stamp they failed under (prebuild_failed.tsv beside prebuilt.tsv): prebuilt.tsv is written with them, and a
 // later start with both the same leaves them to the draws instead of building them again, which would fail the same way (Metal reports a compile that its compiler service
@@ -8111,13 +8175,27 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
     if ([[NSString stringWithContentsOfFile:stamp encoding:NSUTF8StringEncoding error:nil] isEqualToString:want] && !other) { g_pre_running = 0; return -1; }
     int n = (int)pairs.count; uint64_t t0 = bp_now();
     MLOG("pipeline prebuild: %d shader pairs of %s%s%s, %d workers (%s)", n, pp.UTF8String, txt2 ? " and " : "", txt2 ? pp2.UTF8String : "", threads, wait ? "tool" : prepare_on() ? "prepare step, before the first frame" : "background");
-    atomic_store(&g_pre_next, 0);
+    // The workers take the list in chunks of PRE_CHUNK consecutive pairs (g_pre_chunk), so a run of pairs with one vertex shader is compiled by one worker one after another
+    // (its program compiled once, then found) instead of by several at once waiting on each other (cap_fns_take), and the balance stays dynamic. Ocarina of Time, 6,000 pairs on
+    // an empty archive (M2 Max, 12 workers): 213 s with 4 waits, against 295-308 s with about 570 waits for 12 equal stretches and 786 s for 10,000 pairs in list order.
+    // Each chunk has its own cursor: a worker that finds no new chunk takes the pairs other workers' chunks have left (from the first chunk on), so a compile that does not return
+    // (GitHub issue #294) strands no pair of its chunk. g_pre_next still counts the pairs a worker started, which the prepare step waits for
+    int nch = (n + PRE_CHUNK - 1) / PRE_CHUNK; _Atomic int *cur = calloc((size_t)(nch ? nch : 1), sizeof *cur);
+    for (int c = 0; c < nch; c++) atomic_store(&cur[c], c * PRE_CHUNK);
+    __block _Atomic int flushed = 0;
+    atomic_store(&g_pre_next, 0); atomic_store(&g_pre_chunk, 0);
     dispatch_group_t g = dispatch_group_create();
     for (int t = 0; t < threads; t++) dispatch_group_async(g, dispatch_get_global_queue(qos, 0), ^{
-        for (;;) {
-            int i = atomic_fetch_add(&g_pre_next, 1);
-            // the first worker to find no pair left hands the period over: it is written once the compiles still under way in it return, not after the slowest of all
-            if (i >= n) { if (i == n) arch_flush(); break; }
+        for (int c = atomic_fetch_add(&g_pre_chunk, 1), steal = 0;;) {
+            int i = c < nch ? atomic_fetch_add(&cur[c], 1) : n, end = c < nch ? (c + 1) * PRE_CHUNK : n;
+            if (i >= end || i >= n) {   // this chunk is taken: a new one, else the first with pairs left
+                c = steal ? nch : atomic_fetch_add(&g_pre_chunk, 1);
+                if (c >= nch) { steal = 1; for (c = 0; c < nch && atomic_load(&cur[c]) >= ((c + 1) * PRE_CHUNK < n ? (c + 1) * PRE_CHUNK : n); c++) {} }
+                // the first worker to find no pair left hands the period over: it is written once the compiles still under way in it return, not after the slowest of all
+                if (c >= nch) { if (!atomic_exchange(&flushed, 1)) arch_flush(); break; }
+                continue;
+            }
+            atomic_fetch_add(&g_pre_next, 1);
             pre_pair(pairs[(NSUInteger)i][0], pairs[(NSUInteger)i][1], zero);
             int d = ++g_pre_done;
             if (d % 1000 == 0) {
@@ -8127,13 +8205,14 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
         }
     });
     dispatch_block_t done = ^{
+        free(cur);   // every worker has left
         arch_flush_wait();
         NSMutableArray<NSString *> *fails = [NSMutableArray arrayWithArray:g_pre_known.allValues]; [fails addObjectsFromArray:g_pre_fails];
         if (fails.count) [[NSString stringWithFormat:@"# pipeline prebuild: pairs whose base failed to build on this system build, left to the draws until it or the stamp changes (nvn_mtl.m, pre_fail_load)\n%@%@\n",
                             pre_fail_head(want), [fails componentsJoinedByString:@"\n"]] writeToFile:failp atomically:YES encoding:NSUTF8StringEncoding error:nil];
         else unlink(failp.fileSystemRepresentation);
         [want writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
-        MLOG("pipeline prebuild done: %d pairs, %d bases built, %d already archived, %d left to the draws, %d failed, %.1f s", n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9);
+        MLOG("pipeline prebuild done: %d pairs, %d bases built, %d already archived, %d left to the draws, %d failed, %.1f s; %llu compiles waited for another of the same stage function (%llu of them went on after %d ms; %.1f s waited in all, the longest wait %.1f ms)", n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9, (unsigned long long)atomic_load(&g_cap_fn_waits), (unsigned long long)atomic_load(&g_cap_fn_late), CAP_FN_WAIT_MS, g_cap_fn_wait_ns / 1e9, g_cap_fn_wait_max / 1e6);
         if (fails.count) MLOG("pipeline prebuild: %lu pairs whose base failed are left to the draws (%s; %d of them failed on an earlier start of this system build, not built again); another system build tries them again",
                               (unsigned long)fails.count, failp.UTF8String, (int)g_pre_known_n);
         g_pre_running = 0;
@@ -8192,6 +8271,7 @@ static __unsafe_unretained id<MTLRenderPipelineState> sm_amp_get(const pso_key *
     return nil;
 }
 static __unsafe_unretained id<MTLRenderPipelineState> pso_get_(NvProg *pr, MTLRenderPassDescriptor *unused) {
+    t_cap_submit = 1;   // the draws' thread: its capture compile waits count as frame time (mtl_pso_line)
     (void)unused;
     g_pso_pull = 0;   // set again only where a pulling pipeline is returned: a stale 1 made the next draw, whose pipeline came from the cache, bind the layout block instead of its streams
     __unsafe_unretained NvShader *vs = pr->sh[0], *fs = pr->sh[1];
