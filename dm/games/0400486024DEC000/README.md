@@ -264,3 +264,7 @@ Open: extracted legacy raw-load grouping (builder opt-in `DMSH_RAW_LOAD_QUADS=1`
 
 Historical chat evidence, 2026-11-08 02:42–02:46 UTC: ordinary-compute grouped loads on the combined branch reduced median GPU time from 11.77 to 11.09 ms (5.8%); the reverse-order comparison reported 5.5%. GPU clocks matched and no shader compilation occurred during measurement. Those results belong to the broader pointer-site implementation, not the narrower legacy-helper extraction here. No performance gain is claimed for this PR until the current-chain rebuild and matched A/B run are complete. Quality reduction is not part of either pass.
 - [A capture lists each large memory pool whole](../../../docs/reference/nvn-objects.md#a-capture-lists-each-large-memory-pool-whole): the replay refused a capture with 1,025 pointers in no region; the untouched part of a large pool was saved as outside memory.
+
+## Fork PR integration (2026-11-09)
+
+Current source integration for an M2 Max MacBook Pro with 96 GB RAM: [PR decisions and validation](pr-audit-20261109.md). Imported changes are not yet a measured M2 Max gameplay result; rebuild the shader libraries for the committed chain before running the new host.
