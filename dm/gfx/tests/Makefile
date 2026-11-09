@@ -606,3 +606,9 @@ check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1
 t_ixc_ranges: t_ixc_ranges.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ $< $(MTL_T_SRC) $(FW)
 check_t_ixc_ranges: RUN_ENV = MTL_DEBUG_LAYER=1
+# Scalar and grouped raw reads against a CPU oracle, including range crossings.
+t_raw_quad: t_raw_quad.m
+	clang $(CFLAGS) -fobjc-arc -o $@ $< -framework Foundation -framework Metal
+.PHONY: check_t_raw_quad
+check_t_raw_quad: t_raw_quad
+	@set -e; work=$$(mktemp -d); trap 'rm -rf "$$work"' EXIT; python3 test_dmsh_raw_quads_dynamic.py --fixture "$$work"; MTL_DEBUG_LAYER=1 ./t_raw_quad "$$work/scalar.metallib" "$$work/quads.metallib"
