@@ -589,3 +589,7 @@ check_t_tg_spill: t_tg_spill
 t_sparse_pool_cache: t_sparse_pool_cache.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_sparse_pool_cache.m $(filter-out ../nvn/hle_nvn.c,$(MTL_T_SRC)) $(FW)
 check_t_sparse_pool_cache: RUN_ENV = MTL_DEBUG_LAYER=1
+# Indirect cache range proof, including input offsets past output capacity.
+t_ixc_ranges: t_ixc_ranges.m $(MTL_T_DEP)
+	clang $(CFLAGS) -fobjc-arc -o $@ $< $(MTL_T_SRC) $(FW)
+check_t_ixc_ranges: RUN_ENV = MTL_DEBUG_LAYER=1
