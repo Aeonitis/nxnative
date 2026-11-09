@@ -22,7 +22,7 @@ from test_dmsh_raw_last import LDG, MAC_METAL   # noqa: E402
 LDG_R5 = (LDG[0], (LDG[1] & ~(0x3f << 32)) | 0x3f << 32)   # LDG.E R6, [R5]: the uniform register is URZ, so the address is R5 (the thread index) alone, a 32-bit register
 OFFSETS = (0, 4, 12)
 RESOLVE = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){4}const device (_\d+)& \w+, thread uint& _\d+\)\n\{\n')
-RESOLVED = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){5}const device _\d+& \w+, thread uint& _\d+\)\n\{\n')
+RESOLVED = re.compile(r'(?m)^int (_\d+)\((?:thread const int& _\d+, ){6}const device _\d+& \w+, const device _\d+& \w+, thread uint& _\d+\)\n\{\n')
 
 # The pool table as in test_dmsh_raw_last (nvn_mtl.m gmem_map, dmsh_abi.h DMSH_GMEM_MAP_*): pools A and B adjacent (entries 1 and 2), C past a gap and above 4 GiB (entry 3) with a hint
 # for its 2 MiB chunk. Each lane resolves [base, base + 16) and loads +0, +4 and +12: inside A, across A's end into B, inside C, across C's end into the gap, in the gap, at address 0
@@ -93,11 +93,11 @@ class RawRun(Translated):
         msl = self.msl()
         r, h = RESOLVE.search(msl), RESOLVED.search(msl)
         n = 6
-        body = ''.join(f'        {{ uint a = b.x + {o}u; int alo = int(a), ahi = hi + (a < b.x ? 1 : 0); out[(i * {n} + s) * 4 + {k + 1}] = {h.group(1)}(alo, ahi, e, dlo, dhi, map, last); }}\n'
+        body = ''.join(f'        {{ uint a = b.x + {o}u; int alo = int(a), ahi = hi + (a < b.x ? 1 : 0); out[(i * {n} + s) * 4 + {k + 1}] = {h.group(1)}(alo, ahi, no_site, e, dlo, dhi, map, map, last); }}\n'
                        for k, o in enumerate(OFFSETS))
         kernel = (msl[:msl.index('kernel void main0')] +
                   f'kernel void k(const device {r.group(2)}& map [[buffer(0)]], const device uint2* base [[buffer(1)]], device int* out [[buffer(2)]], uint i [[thread_position_in_grid]])\n'
-                  '{\n    uint last = 0u, chosen = 0u;\n'
+                  '{\n    uint last = 0u, chosen = 0u; int no_site = -1;\n'
                   f'    for (int s = 0; s < {n}; s++)\n    {{\n        uint2 b = base[i * {n} + s]; int lo = int(b.x), hi = int(b.y);\n'
                   '        uint en = b.x + 16u; int elo = int(en), ehi = hi + (en < b.x ? 1 : 0);\n'
                   f'        int e = {r.group(1)}(lo, hi, elo, ehi, map, chosen);\n'

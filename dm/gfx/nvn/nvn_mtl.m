@@ -8332,11 +8332,11 @@ static __thread int t_cap_submit;   // this thread is the submit thread (pso_get
 // The wait is bounded: a compile Apple's compiler never finishes must not hold the others back (t_pso_stall, t_pso_archive's concurrent bases). A base takes well under a second,
 // so after 2 s the compile goes on beside the slow one
 enum { CAP_FN_WAIT_MS = 2000 };
-static void cap_fns_take(NSString *a, NSString *b) {   // waits until no capture compile under way has either function, or CAP_FN_WAIT_MS, then holds both
+static void cap_fns_take3(NSString *a, NSString *b, NSString *c) {   // waits until no capture compile under way has either function, or CAP_FN_WAIT_MS, then holds both
     pthread_mutex_lock(&g_cap_fn_mu);
     if (!g_cap_fns) g_cap_fns = [NSCountedSet set];
     int waited = 0, late = 0; uint64_t t0 = 0, cap = (uint64_t)CAP_FN_WAIT_MS * 1000000ull;
-    while ((a && [g_cap_fns containsObject:a]) || (b && [g_cap_fns containsObject:b])) {
+    while ((a && [g_cap_fns containsObject:a]) || (b && [g_cap_fns containsObject:b]) || (c && [g_cap_fns containsObject:c])) {
         if (!waited) { waited = 1; t0 = bp_now(); }
         uint64_t el = bp_now() - t0;   // the monotonic clock: a wall-clock step changes no cap
         if (el >= cap) { late = 1; break; }
@@ -8345,6 +8345,7 @@ static void cap_fns_take(NSString *a, NSString *b) {   // waits until no capture
     }
     if (a) [g_cap_fns addObject:a];
     if (b) [g_cap_fns addObject:b];
+    if (c) [g_cap_fns addObject:c];
     pthread_mutex_unlock(&g_cap_fn_mu);
     if (!waited) return;
     uint64_t w = bp_now() - t0, m = atomic_load(&g_cap_fn_wait_max);
@@ -8353,13 +8354,16 @@ static void cap_fns_take(NSString *a, NSString *b) {   // waits until no capture
     if (late) atomic_fetch_add(&g_cap_fn_late, 1);
     if (t_cap_submit) { atomic_fetch_add(&g_cap_fn_sub_waits, 1); atomic_fetch_add(&g_cap_fn_sub_ns, w); }
 }
-static void cap_fns_give(NSString *a, NSString *b) {
+static void cap_fns_give3(NSString *a, NSString *b, NSString *c) {
     pthread_mutex_lock(&g_cap_fn_mu);
     if (a) [g_cap_fns removeObject:a];
     if (b) [g_cap_fns removeObject:b];
+    if (c) [g_cap_fns removeObject:c];
     pthread_cond_broadcast(&g_cap_fn_cv);
     pthread_mutex_unlock(&g_cap_fn_mu);
 }
+static void cap_fns_take(NSString *a, NSString *b) { cap_fns_take3(a, b, nil); }
+static void cap_fns_give(NSString *a, NSString *b) { cap_fns_give3(a, b, nil); }
 // A flush period's size. Metal keeps each serializer's state in an LMDB environment of fixed map size (10 MB, in its own com.apple.gpuarchiver/gpuarchiver-* folder under the
 // user cache folder, PersistentState), and once that is full every compile through the period's compiler fails ("cannot commit transaction …: MDB_MAP_FULL", "cannot write
 // 'UNITSMAPPINGS' database"), not only its capture. Periods of 3,508 bases were written whole; Ocarina of Time's compacting prewarm of a 40,000-row list, whose flushes waited
@@ -8417,9 +8421,16 @@ static void arch_cap_failed(ArchEpoch *ep, NSError *ce, const char *what) {
 static id<MTLRenderPipelineState> arch_capture(MTL4PipelineDescriptor *d, NSError **e, int vd, int *captured) {
     if (captured) *captured = 0;
     if (!arch_capturing()) return [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
-    NSString *vf = cap_fn_key(d.vertexFunctionDescriptor), *ff = cap_fn_key(d.fragmentFunctionDescriptor);
+    NSString *vf = nil, *ff = nil, *tf = nil;
+    if ([d isKindOfClass:MTL4MeshRenderPipelineDescriptor.class]) {
+        MTL4MeshRenderPipelineDescriptor *md = (MTL4MeshRenderPipelineDescriptor *)d;
+        vf = cap_fn_key(md.meshFunctionDescriptor); ff = cap_fn_key(md.fragmentFunctionDescriptor); tf = cap_fn_key(md.objectFunctionDescriptor);
+    } else {
+        MTL4RenderPipelineDescriptor *rd = (MTL4RenderPipelineDescriptor *)d;
+        vf = cap_fn_key(rd.vertexFunctionDescriptor); ff = cap_fn_key(rd.fragmentFunctionDescriptor);
+    }
     if (ff && vf && [ff isEqualToString:vf]) ff = nil;
-    cap_fns_take(vf, ff);
+    cap_fns_take3(vf, ff, tf);
     ArchEpoch *ep = ep_enter(); NSError *ce = nil;
     id<MTLRenderPipelineState> ps = [ep->comp newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:&ce];
     int full = 0;
@@ -8427,7 +8438,7 @@ static id<MTLRenderPipelineState> arch_capture(MTL4PipelineDescriptor *d, NSErro
               if ([d isKindOfClass:MTL4MeshRenderPipelineDescriptor.class]) atomic_fetch_add(&ep->ms, 1);
               full = atomic_fetch_add(&ep->n, 1) + 1 == g_arch_period_max; }
     ep_leave(ep);
-    cap_fns_give(vf, ff);
+    cap_fns_give3(vf, ff, tf);
     if (ps) { if (captured) *captured = 1; if (full) arch_flush_from(ep); return ps; }
     ps = [g_comp4 newRenderPipelineStateWithDescriptor:d compilerTaskOptions:nil error:e];
     if (ps) arch_cap_failed(ep, ce, "render"); else if (e && !*e) *e = ce;
