@@ -103,6 +103,9 @@ def by_build(main_id):   # the profile whose build rows register this main build
 
 # agl's upscaler network (NDSR), by where the shader map found each key: the compute shaders of agl_ndsr.pck (Donkey Kong Bananza's 24 in its release library, Splatoon Raiders' 20 in its debug one)
 UPSCALER_SOURCE = re.compile(r'/agl_ndsr\.pck#')
+# agl's chained upscaler (NDSR VR): the compute shaders of agl_ndsr_vr.pck and agl_ndsr_vr_light.pck (Ocarina of Time's 20 and 17). Four dispatches a frame, not one: three that pack the
+# frame's colour into images only the chain reads, then the network, which writes the output picture (nvn_mtl.m up_chain_dispatch)
+UPSCALER_CHAIN_SOURCE = re.compile(r'/agl_ndsr_vr(_light)?\.pck#')
 
 
 # nn::movie's enhancement networks (NDVE files, Movie/Ndve/*.dat.zs): the compute shaders the shader map found in the file's NDVE part (Ocarina of Time's 12: the colour conversion
@@ -210,7 +213,7 @@ def header_one(g):
     if vcr not in ('on', 'off'): sys.exit(f'{g.id}: vconv_range must be on or off: {vcr}')
     mml = g.get('mem_map_limit', 'off')   # MapPhysicalMemory refused beyond the application pool, as on Horizon (hle_svc.c): on / off
     if mml not in ('on', 'off'): sys.exit(f'{g.id}: mem_map_limit must be on or off: {mml}')
-    ups, mvn = upscaler_keys(g), upscaler_keys(g, MOVIE_NET_SOURCE)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
+    ups, mvn, chain = upscaler_keys(g), upscaler_keys(g, MOVIE_NET_SOURCE), upscaler_keys(g, UPSCALER_CHAIN_SOURCE)   # the game's own upscaler shaders, which DM_UPSCALER=metalfx (the launcher's Game's upscaler) replaces with MetalFX's spatial scaler (nvn_mtl.m up_mfx_encode)
     dbr = g.get('draw_barriers', 'full')   # how draw passes are ordered (nvn_mtl.m barrier_game): full = each waits for all earlier GPU work, game = by the game's own barriers, so vertex work overlaps the previous pass's fragments
     if dbr not in ('full', 'game'): sys.exit(f'{g.id}: draw_barriers must be full or game: {dbr}')
     tsh = g.get('gpu_ts_hz', '614400000')   # the counter timestamps' tick rate (nvn_timestamp.h): 614400000 (NVN), 31250000 for a Switch 2 game that reads raw reports at its system counter rate
@@ -274,8 +277,9 @@ def header_one(g):
          f'#define DM_GAME_GPU_TS_SEGMENT {int(gts == "segment")}',
          f'#define DM_GAME_DRAW_BARRIERS_GAME {int(dbr == "game")}',
          f'#define DM_GAME_GPU_TS_HZ {int(tsh)}ull',
-         f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups)}',
+         f'#define DM_GAME_UPSCALER_KEYS {q(",".join(ups))}', f'#define DM_GAME_UPSCALER_N {len(ups) + len(chain)}',
          f'#define DM_GAME_MOVIE_NET_KEYS {q(",".join(mvn))}', f'#define DM_GAME_MOVIE_NET_N {len(mvn)}',
+         f'#define DM_GAME_UPSCALER_CHAIN_KEYS {q(",".join(chain))}', f'#define DM_GAME_UPSCALER_CHAIN_N {len(chain)}',
          f'#define DM_GAME_VCONV_RANGE {int(vcr == "on")}',
          *([f'#define DM_GAME_NVN_API_MAJOR {api.split(".")[0]}', f'#define DM_GAME_NVN_API_MINOR {api.split(".")[1]}'] if g.get('device_api', '') else []),   # without the key: by the SDK version (hle_nvn.c nvn_api)
          '']
