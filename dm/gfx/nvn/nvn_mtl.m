@@ -14563,7 +14563,24 @@ static int skip_fs_draw(NvProg *pr) {
     for (int i = 0; i < nsk; i++) if (!strncmp(pr->sh[1]->key, sk[i], strlen(sk[i]))) return 1;
     return 0;
 }
-static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
+// DM_NVN_CUT_DRY=0|1|ab (on by default): when the GPU has run out of committed work (nothing in flight) inside a draw pass with at least DM_NVN_CUT_DRY_N (24) draws encoded since
+// the last commit, the pass ends before the next draw and the segment commits there; the draw opens the pass again (loading its attachments). sub_cut commits only between passes,
+// at a target change: in Ocarina of Time's scene passes (500-800 draws) the GPU sat idle while the host encoded up to the pass's end (a probe on an M1: 1.5 times a frame, 0.33 ms
+// each, the replay already 1.1 ms into the job and the game's job handed over 20 ms before). A split costs about 65 us there. Runs cd1 / cd2: -0.3 / -0.15 ms a frame, the slow spot
+// at 33.3 ms (30 fps) in the phases it is on in
+static uint64_t g_dry_cuts; static uint64_t g_cut_draw0;   /* defined with sub_cut */
+static int g_cut_dry;   // sub_cut called by dry_cut_try: it commits whatever the draw count
+static int dry_cut_on(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN_CUT_DRY", 1); if (m != 1) MLOG("DM_NVN_CUT_DRY=%d: no segment commit inside a draw pass%s", m, m ? " in the A/B phases it is off in" : ""); } return m && sw_on(m); }
+static void sub_cut(void);
+static void dry_cut_try(void) {
+    static long k = -1; if (k < 0) { const char *e = getenv("DM_NVN_CUT_DRY_N"); k = e && atol(e) > 0 ? atol(e) : 24; }
+    if (!g_enc || !g_cb || atomic_load_explicit(&g_seg_inflight, memory_order_relaxed) || g_stat_draw - g_cut_draw0 < (uint64_t)k) return;
+    if (g_defer_replaying || g_defer_nact || g_defer_pend || g_fz.active || g_fz_checking || g_hoist_n || g_rt_merged || g_geo_program || !dry_cut_on()) return;
+    PD("M %llu the GPU ran dry: render pass split for a segment commit", g_stat_pass);
+    rp_end(); g_cut_dry = 1; sub_cut(); g_cut_dry = 0;
+    if (!g_dry_cuts++) MLOG("segment commit inside a draw pass while the GPU had run dry (DM_NVN_CUT_DRY): first case pass %llu", (unsigned long long)g_stat_pass);
+}
+static void draw(const p_draw *dw, const p_draw_idx *di) { cp_stamp start = cp_begin(); dry_cut_try(); if (dw && dw->prim == DM_PRIM_MESH_TASKS) mesh_tasks_draw(dw); else draw_(dw, di); cp_end(5, start); }
 // DM_NVN_VIS_NEED=0|1|ab (on by default): draws count samples for an occlusion query only while a later report can see them. NVN's samples-passed counter is a running total
 // that a reset zeroes, so after a samples-passed reset or report, when the next samples-passed op in replay order is a reset, the draws up to it add to a total nothing reports
 // (zskip_vis_dead reasons the same way for skipped draws); when it is a report, or the scan cannot see one (the submission's end, 20,000 ops), they count as before. The values
@@ -15955,7 +15972,7 @@ static int cut_first(void) { static int m = -1; if (m < 0) { m = sw_mode("DM_NVN
 static void sub_cut(void) {
     int first = g_seg == 0 && cut_first();
     static int fn = -1; if (fn < 0) { const char *e = getenv("DM_NVN_CUT_FIRST_N"); fn = e && atoi(e) > 0 ? atoi(e) : 8; }
-    int n = first ? fn : cut_draws();
+    int n = g_cut_dry ? 1 : first ? fn : cut_draws();   // see dry_cut_on
     if (!g_cb || g_enc) return;
     if ((!g_cut_copy && (n <= 0 || g_stat_draw - g_cut_draw0 < (uint64_t)n)) || g_hoist_n || g_defer_nact || g_defer_pend || g_fz.active || g_rt_merged) return;
     // The cut is there so that the GPU does not sit idle while the host encodes. With earlier work still running a commit gains nothing and queues one more command buffer: each is a call into the kernel on Metal's one submission queue, and with buffers queued behind running work
