@@ -1096,14 +1096,14 @@ static void is_set_state(istream *s, int state) {
     if (stop) g_mic.stop();
     pthread_mutex_unlock(&g_mic_lock);
 }
-HLE_FORCE_BIG("_ZN2nn5audio16StartInputStreamEPNS0_15InputStreamTypeE", "start the capture into the stream", Result, h_is_Start, void *g) {
+HLE_FORCE("_ZN2nn5audio16StartInputStreamEPNS0_15InputStreamTypeE", "start the capture into the stream", Result, h_is_Start, void *g) {
     istream *s = objmap_get(g); if (!s) return RES_FAIL;
     is_set_state(s, IS_STARTED); return RES_OK;
 }
-HLE_FORCE_BIG("_ZN2nn5audio15StopInputStreamEPNS0_15InputStreamTypeE", "stop the capture into the stream (what it holds stays)", void, h_is_Stop, void *g) {
+HLE_FORCE("_ZN2nn5audio15StopInputStreamEPNS0_15InputStreamTypeE", "stop the capture into the stream (what it holds stays)", void, h_is_Stop, void *g) {
     istream *s = objmap_get(g); if (s) is_set_state(s, IS_STOPPED);
 }
-HLE_FORCE_BIG("_ZN2nn5audio16CloseInputStreamEPNS0_15InputStreamTypeE", "close the stream", void, h_is_Close, void *g) {
+HLE_FORCE("_ZN2nn5audio16CloseInputStreamEPNS0_15InputStreamTypeE", "close the stream", void, h_is_Close, void *g) {
     istream *s = objmap_get(g); if (!s) return;
     is_set_state(s, IS_NONE);
     pthread_mutex_lock(&g_is_lock);
